@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+saves/*.eco
+verification_output/
+build/
+dist/
+*.spec

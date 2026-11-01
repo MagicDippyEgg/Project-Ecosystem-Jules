@@ -1,0 +1,54 @@
+name: Build Linux Standalone Executable
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build and Package Executable
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libsdl2-2.0-0 libsdl2-image-2.0-0 libsdl2-mixer-2.0-0 libsdl2-ttf-2.0-0
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Test Suite
+        run: |
+          pytest -v tests/
+
+      - name: Build Standalone Executable with PyInstaller
+        run: |
+          pyinstaller --onefile --name ecosystem --clean main.py
+
+      - name: Verify Executable in Virtual Display
+        run: |
+          chmod +x dist/ecosystem
+          xvfb-run -s "-screen 0 1280x800x24" timeout 5 ./dist/ecosystem || [ $? -eq 124 ]
+
+      - name: Upload Linux Executable Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecosystem-linux-x86_64
+          path: dist/ecosystem
+          if-no-files-found: error
+          retention-days: 14
