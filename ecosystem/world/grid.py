@@ -135,13 +135,15 @@ class WorldGrid:
     def update_resources(self, weather: WeatherSystem) -> None:
         """Regenerate plant food and decay carrion over time."""
         # Plant growth depends on fertility, moisture delta, and sunlight
-        sunlight = max(0.2, weather.daylight_intensity)
-        growth_rate = 0.08 * self.fertility * weather.current_state.moisture_delta * sunlight
+        sunlight = max(0.25, weather.daylight_intensity)
+        growth_rate = 0.12 * self.fertility * weather.current_state.moisture_delta * sunlight
 
         # Logistic vegetation growth: dV/dt = r * V * (1 - V / K) + base_sprout
         free_capacity = np.maximum(0.0, self.max_vegetation - self.vegetation)
-        growth = growth_rate * np.sqrt(self.vegetation + 1.0) * (free_capacity / (self.max_vegetation + 1e-4))
-        self.vegetation = np.clip(self.vegetation + growth, 0.0, self.max_vegetation)
+        growth = growth_rate * np.sqrt(self.vegetation + 2.0) * (free_capacity / (self.max_vegetation + 1e-4))
+        # Ensure minimum base sprout on fertile tiles so vegetation never vanishes permanently
+        base_sprout = 0.02 * self.fertility
+        self.vegetation = np.clip(self.vegetation + growth + base_sprout, 0.0, self.max_vegetation)
 
         # Slowly decompose carrion
         self.carrion = np.maximum(0.0, self.carrion * 0.995 - 0.02)
@@ -169,15 +171,47 @@ class WorldGrid:
         if 0 <= x < self.width and 0 <= y < self.height:
             self.carrion[y, x] = min(150.0, self.carrion[y, x] + amount)
 
-    def find_nearest_water(self, start_x: float, start_y: float, search_radius: int = 15) -> Optional[Tuple[int, int]]:
-        """Fast radial search for the nearest water tile."""
+    def is_drinkable_shore(self, x: int, y: int) -> bool:
+        """Checks if tile (x, y) is walkable land directly adjacent to drinkable water."""
+        if not (0 <= x < self.width and 0 <= y < self.height):
+            return False
+        if not self.is_walkable(x, y):
+            return False
+        # Check adjacent neighbors for water
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)):
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < self.width and 0 <= ny < self.height and self.is_water(nx, ny):
+                return True
+        return False
+
+    def find_nearest_drinkable_shore(self, start_x: float, start_y: float, search_radius: int = 25) -> Optional[Tuple[int, int]]:
+        """Finds nearest safely accessible walkable shoreline tile adjacent to water."""
         ix, iy = int(start_x), int(start_y)
-        # Check starting tile first
-        if self.is_water(ix, iy):
+        if self.is_drinkable_shore(ix, iy):
             return (ix, iy)
 
         for r in range(1, search_radius + 1):
-            # Scan perimeter of square at radius r
+            # Check perimeter
+            for dx in range(-r, r + 1):
+                for dy in (-r, r):
+                    tx, ty = ix + dx, iy + dy
+                    if self.is_drinkable_shore(tx, ty):
+                        return (tx, ty)
+            for dy in range(-r + 1, r):
+                for dx in (-r, r):
+                    tx, ty = ix + dx, iy + dy
+                    if self.is_drinkable_shore(tx, ty):
+                        return (tx, ty)
+        return None
+
+    def find_nearest_water(self, start_x: float, start_y: float, search_radius: int = 25) -> Optional[Tuple[int, int]]:
+        """Finds safely accessible drinking shore, or nearest water tile."""
+        shore = self.find_nearest_drinkable_shore(start_x, start_y, search_radius)
+        if shore is not None:
+            return shore
+
+        ix, iy = int(start_x), int(start_y)
+        for r in range(1, search_radius + 1):
             for dx in range(-r, r + 1):
                 for dy in (-r, r):
                     tx, ty = ix + dx, iy + dy

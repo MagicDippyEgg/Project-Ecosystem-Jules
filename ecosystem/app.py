@@ -209,10 +209,11 @@ class EcosystemApp:
         if self.status_timer > 0:
             self.status_timer -= 1
 
-        # Smooth camera tracking of selected organism
-        sel_org = self.sim.get_selected_organism()
-        if sel_org is not None:
-            self.camera.update_tracking(sel_org.x, sel_org.y)
+        # Smooth camera tracking of selected organism (if user is not manually panning)
+        if not self.camera.is_dragging:
+            sel_org = self.sim.get_selected_organism()
+            if sel_org is not None and self.camera.tracking_target_id == sel_org.id:
+                self.camera.update_tracking(sel_org.x, sel_org.y)
 
         # Simulation stepping based on speed
         if not self.sim.is_paused:

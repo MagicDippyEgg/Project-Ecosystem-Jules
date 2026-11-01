@@ -45,11 +45,14 @@ class Camera:
     def handle_event(self, event: pygame.event.Event) -> bool:
         """Handle mouse drag and mouse wheel zoom events. Returns True if consumed."""
         if event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button == 2 or (event.button == 1 and pygame.key.get_mods() & pygame.KMOD_CTRL):
-                # Middle click or Ctrl+Click to pan
+            # Button 3 = Right Click, Button 2 = Middle Click, Button 1 + Ctrl
+            if event.button in (2, 3) or (event.button == 1 and pygame.key.get_mods() & pygame.KMOD_CTRL):
                 self.is_dragging = True
+                self.drag_button = event.button
                 self.drag_start_screen = event.pos
                 self.drag_start_offset = (self.offset_x, self.offset_y)
+                # Manual dragging breaks organism lock-on tracking
+                self.tracking_target_id = None
                 return True
             elif event.button == 4:  # Wheel up (Zoom in)
                 self.adjust_zoom(1.15, event.pos)
@@ -59,7 +62,10 @@ class Camera:
                 return True
 
         elif event.type == pygame.MOUSEBUTTONUP:
-            if event.button in (1, 2) and self.is_dragging:
+            if hasattr(self, "drag_button") and event.button == self.drag_button and self.is_dragging:
+                self.is_dragging = False
+                return True
+            elif event.button in (1, 2, 3) and self.is_dragging:
                 self.is_dragging = False
                 return True
 

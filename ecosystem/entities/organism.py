@@ -154,18 +154,21 @@ class Organism:
         nearby_organisms: List["Organism"],
         rng: random.Random,
     ) -> None:
-        """Utility AI evaluating survival drives to select optimal action."""
-        # Environmental visibility factor
+        """Enhanced utility AI evaluating survival drives, dangers, and reachable targets."""
         effective_sight = self.genome.sense_radius * weather.current_state.visibility_factor
         if weather.is_night:
-            effective_sight *= 0.6
+            effective_sight *= 0.65
 
-        # Need urgencies [0.0 to 1.0]
-        thirst_urgency = 1.0 - (self.water / self.max_water)
-        hunger_urgency = 1.0 - (self.energy / self.max_energy)
-        health_urgency = 1.0 - (self.health / self.max_health)
+        # Need ratios [0.0 = full, 1.0 = empty/critical]
+        water_ratio = self.water / self.max_water
+        energy_ratio = self.energy / self.max_energy
+        health_ratio = self.health / self.max_health
 
-        # Scan for threats (predators nearby)
+        thirst_urgency = 1.0 - water_ratio
+        hunger_urgency = 1.0 - energy_ratio
+        health_urgency = 1.0 - health_ratio
+
+        # Scan for threats, prey, and mates
         nearest_threat: Optional["Organism"] = None
         min_threat_dist = 999.0
         potential_prey: List["Organism"] = []
@@ -180,98 +183,114 @@ class Organism:
             if dist > effective_sight:
                 continue
 
-            # Threat check: other is carnivore/omnivore, bigger than me, or aggressive
-            if (other.is_carnivore or other.is_omnivore) and (other.genome.size > self.genome.size * 0.9):
-                if dist < min_threat_dist:
-                    min_threat_dist = dist
-                    nearest_threat = other
+            # Threat check: other is dangerous predator
+            # Predators only threaten if other is bigger, or if other is an aggressive carnivore
+            if (other.is_carnivore or (other.is_omnivore and other.genome.diet > 0.55)):
+                # Must be reasonably larger or aggressive to be an active threat
+                if other.species_id != self.species_id and (other.genome.size > self.genome.size * 0.85):
+                    if dist < min_threat_dist:
+                        min_threat_dist = dist
+                        nearest_threat = other
 
-            # Prey check: I am carnivore/omnivore, other is smaller and not my own species
-            if (self.is_carnivore or self.is_omnivore) and other.species_id != self.species_id:
-                if self.genome.size >= other.genome.size * 0.75:
-                    potential_prey.append(other)
+            # Prey check: I am predator or hungry omnivore, other is smaller and not my species
+            if (self.is_carnivore or (self.is_omnivore and hunger_urgency > 0.45)) and other.species_id != self.species_id:
+                # Predator shouldn't waste energy chasing prey that is much faster than itself
+                if self.genome.speed >= other.genome.speed * 0.8:
+                    if self.genome.size >= other.genome.size * 0.65:
+                        potential_prey.append(other)
 
-            # Mate check: same species, mature, not pregnant, not on cooldown, sufficient energy
+            # Mate check: same species, mature, healthy, not pregnant, not on cooldown
             if (other.species_id == self.species_id and other.is_mature and
                 not other.is_pregnant and other.mate_cooldown == 0 and
-                other.energy > other.max_energy * other.genome.reproduction_threshold):
+                other.water > other.max_water * 0.5 and other.energy > other.max_energy * other.genome.reproduction_threshold):
                 potential_mates.append(other)
 
-        # 1. Threat response: Flee!
-        flee_threshold = 4.0 + (1.0 - self.genome.bravery) * 8.0
-        if nearest_threat is not None and min_threat_dist < flee_threshold:
+        # 1. IMMEDIATE LIFE-THREATENING DANGER: FLEE
+        # Prey flees intelligently towards safe walkable land
+        flee_distance_threshold = 3.5 + (1.0 - self.genome.bravery) * 6.0
+        if nearest_threat is not None and min_threat_dist < flee_distance_threshold:
             self.current_action = OrganismAction.FLEE
-            # Run in opposite direction
             escape_dx = self.x - nearest_threat.x
             escape_dy = self.y - nearest_threat.y
             norm = math.hypot(escape_dx, escape_dy) + 1e-4
-            self.target_x = self.x + (escape_dx / norm) * 10.0
-            self.target_y = self.y + (escape_dy / norm) * 10.0
+            # Look for safe point away from predator that is on land
+            best_escape_x, best_escape_y = self.x + (escape_dx / norm) * 8.0, self.y + (escape_dy / norm) * 8.0
+            self.target_x = max(1.0, min(world.width - 2.0, best_escape_x))
+            self.target_y = max(1.0, min(world.height - 2.0, best_escape_y))
             return
 
-        # 2. Thirst response
-        if thirst_urgency > 0.45 or (thirst_urgency > 0.25 and world.is_water(int(self.x), int(self.y))):
-            water_loc = world.find_nearest_water(self.x, self.y, search_radius=int(effective_sight))
-            if water_loc is not None:
+        # 2. IMMEDIATE DRINKING if already at drinking shoreline and thirsty
+        ix, iy = int(self.x), int(self.y)
+        if world.is_drinkable_shore(ix, iy) and thirst_urgency > 0.25:
+            self.current_action = OrganismAction.DRINK
+            self.target_x, self.target_y = float(ix), float(iy)
+            return
+
+        # 3. CRITICAL THIRST (Dehydration is fatal fast)
+        if thirst_urgency > 0.40:
+            water_shore = world.find_nearest_drinkable_shore(self.x, self.y, search_radius=int(effective_sight + 10))
+            if water_shore is not None:
                 self.current_action = OrganismAction.DRINK
-                self.target_x, self.target_y = water_loc
+                self.target_x, self.target_y = float(water_shore[0]), float(water_shore[1])
                 return
 
-        # 3. Hunger response
-        if hunger_urgency > 0.4:
-            # Herbivore / Omnivore: check plants
-            if not self.is_carnivore:
-                # Check current tile plant level
-                if world.vegetation[int(self.y), int(self.x)] > 10.0:
+        # 4. HUNGER / FORAGING / HUNTING
+        if hunger_urgency > 0.35:
+            # Check for carrion right under creature or within small radius
+            if not self.is_herbivore:
+                # Fast check for carrion
+                if world.carrion[iy, ix] > 3.0:
                     self.current_action = OrganismAction.FORAGE
                     self.target_x, self.target_y = self.x, self.y
                     return
-                # Seek tile with highest vegetation nearby
+
+            # Herbivore / Omnivore: check plants
+            if not self.is_carnivore:
+                if world.vegetation[iy, ix] > 8.0:
+                    self.current_action = OrganismAction.FORAGE
+                    self.target_x, self.target_y = self.x, self.y
+                    return
+                # Seek reachable lush vegetation tile nearby
                 best_veg = 0.0
                 best_pos = None
-                sr = int(effective_sight)
+                sr = min(14, int(effective_sight))
                 for dy in range(-sr, sr + 1, 2):
                     for dx in range(-sr, sr + 1, 2):
-                        tx, ty = int(self.x + dx), int(self.y + dy)
-                        if 0 <= tx < world.width and 0 <= ty < world.height:
-                            if world.vegetation[ty, tx] > best_veg:
-                                best_veg = world.vegetation[ty, tx]
-                                best_pos = (tx, ty)
+                        tx, ty = ix + dx, iy + dy
+                        if 0 <= tx < world.width and 0 <= ty < world.height and world.is_walkable(tx, ty):
+                            veg = world.vegetation[ty, tx]
+                            if veg > best_veg:
+                                best_veg = veg
+                                best_pos = (float(tx), float(ty))
                 if best_pos and best_veg > 5.0:
                     self.current_action = OrganismAction.FORAGE
                     self.target_x, self.target_y = best_pos
                     return
 
-            # Carnivore / Omnivore: check prey or carrion
-            if not self.is_herbivore:
-                # Check if carrion nearby
-                if world.carrion[int(self.y), int(self.x)] > 5.0:
-                    self.current_action = OrganismAction.FORAGE
-                    self.target_x, self.target_y = self.x, self.y
-                    return
-                # Hunt prey
-                if potential_prey:
-                    closest_prey = min(potential_prey, key=lambda p: math.hypot(p.x - self.x, p.y - self.y))
-                    self.current_action = OrganismAction.HUNT
-                    self.target_x, self.target_y = closest_prey.x, closest_prey.y
-                    self.target_entity_id = closest_prey.id
-                    return
+            # Carnivore / Omnivore: hunt prey
+            if not self.is_herbivore and potential_prey:
+                closest_prey = min(potential_prey, key=lambda p: math.hypot(p.x - self.x, p.y - self.y))
+                self.current_action = OrganismAction.HUNT
+                self.target_x, self.target_y = closest_prey.x, closest_prey.y
+                self.target_entity_id = closest_prey.id
+                return
 
-        # 4. Mate seeking
+        # 5. REPRODUCTION: Only if well-fed, hydrated, and safe
         if (self.is_mature and not self.is_pregnant and self.mate_cooldown == 0 and
-            self.energy > self.max_energy * self.genome.reproduction_threshold and potential_mates):
+            water_ratio > 0.60 and energy_ratio > self.genome.reproduction_threshold and
+            health_ratio > 0.70 and potential_mates):
             closest_mate = min(potential_mates, key=lambda m: math.hypot(m.x - self.x, m.y - self.y))
             self.current_action = OrganismAction.MATE
             self.target_x, self.target_y = closest_mate.x, closest_mate.y
             self.target_entity_id = closest_mate.id
             return
 
-        # 5. Low health / energy resting
-        if health_urgency > 0.5 or (self.energy < self.max_energy * 0.3 and weather.is_night):
+        # 6. REST / RECOVERY
+        if health_urgency > 0.40 or (energy_ratio < 0.45 and weather.is_night):
             self.current_action = OrganismAction.REST
             return
 
-        # 6. Default: wander or socialize
+        # 7. DEFAULT: WANDER
         self.current_action = OrganismAction.WANDER
 
     def _execute_action(
@@ -368,6 +387,12 @@ class Organism:
         else:  # WANDER
             self._wander(move_speed * 0.7, world, weather, rng)
 
+    def _can_pass(self, x: float, y: float, world: WorldGrid) -> bool:
+        """Checks if a point is walkable land for this organism."""
+        if not (0 <= x < world.width and 0 <= y < world.height):
+            return False
+        return world.is_walkable(x, y)
+
     def _move_towards(
         self,
         tx: Optional[float],
@@ -387,35 +412,69 @@ class Organism:
         if dist < 0.2:
             return
 
-        self.heading = math.atan2(dy, dx)
+        desired_heading = math.atan2(dy, dx)
         step = min(dist, speed * 0.4)
-        new_x = self.x + math.cos(self.heading) * step
-        new_y = self.y + math.sin(self.heading) * step
 
-        # Boundary and terrain navigation
-        if 0 <= new_x < world.width and 0 <= new_y < world.height:
-            if world.is_walkable(new_x, new_y):
+        # Multi-ray obstacle probe steering (Local pathfinding)
+        # Probe forward, +/- 30 deg, +/- 60 deg, +/- 90 deg, +/- 120 deg
+        test_angles = [0.0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.1, -2.1]
+        best_heading = None
+
+        for angle_offset in test_angles:
+            probe_heading = desired_heading + angle_offset
+            # Probe multiple steps ahead to avoid corners and dead ends
+            probe_ok = True
+            for d_probe in (step * 0.6, step * 1.2, step * 2.0):
+                px = self.x + math.cos(probe_heading) * d_probe
+                py = self.y + math.sin(probe_heading) * d_probe
+                if not self._can_pass(px, py, world):
+                    probe_ok = False
+                    break
+            if probe_ok:
+                best_heading = probe_heading
+                break
+
+        if best_heading is not None:
+            self.heading = best_heading
+            new_x = self.x + math.cos(self.heading) * step
+            new_y = self.y + math.sin(self.heading) * step
+            if self._can_pass(new_x, new_y, world):
                 self.x = new_x
                 self.y = new_y
-            else:
-                # Steer around water/mountains
-                self.heading += rng.uniform(-1.2, 1.2)
         else:
-            self.heading += math.pi
+            # Trapped against obstacle or shore: turn around
+            self.heading += math.pi + rng.uniform(-0.8, 0.8)
+            step_back = step * 0.5
+            bx = self.x + math.cos(self.heading) * step_back
+            by = self.y + math.sin(self.heading) * step_back
+            if self._can_pass(bx, by, world):
+                self.x = bx
+                self.y = by
 
     def _wander(self, speed: float, world: WorldGrid, weather: WeatherSystem, rng: random.Random) -> None:
-        """Natural smooth Brownian random walk."""
-        self.heading += rng.uniform(-0.4, 0.4)
+        """Intelligent Brownian exploration with obstacle avoidance."""
         step = speed * 0.35
-        new_x = self.x + math.cos(self.heading) * step
-        new_y = self.y + math.sin(self.heading) * step
+        # Try slight angular perturbation first
+        perturbations = [rng.uniform(-0.35, 0.35), rng.uniform(-0.8, 0.8), rng.uniform(0.8, 1.6), rng.uniform(-1.6, -0.8), math.pi]
+        moved = False
 
-        if 0 <= new_x < world.width and 0 <= new_y < world.height and world.is_walkable(new_x, new_y):
-            self.x = new_x
-            self.y = new_y
-        else:
-            # Turn around on obstacle or boundary
-            self.heading += rng.uniform(2.0, 3.5)
+        for delta in perturbations:
+            test_heading = self.heading + delta
+            # Look ahead
+            probe_x = self.x + math.cos(test_heading) * (step * 1.5)
+            probe_y = self.y + math.sin(test_heading) * (step * 1.5)
+            if self._can_pass(probe_x, probe_y, world):
+                self.heading = test_heading
+                new_x = self.x + math.cos(self.heading) * step
+                new_y = self.y + math.sin(self.heading) * step
+                if self._can_pass(new_x, new_y, world):
+                    self.x = new_x
+                    self.y = new_y
+                    moved = True
+                    break
+
+        if not moved:
+            self.heading += math.pi + rng.uniform(-0.5, 0.5)
 
     def _metabolic_burn(self, world: WorldGrid, weather: WeatherSystem) -> None:
         """Burn energy and water based on size, speed, terrain, and temperature."""
@@ -423,14 +482,15 @@ class Organism:
         stamina_factor = weather.current_state.stamina_drain_factor
 
         # Basal metabolic rate: Kleiber's law approximation (mass^0.75)
-        bmr = 0.08 * (self.genome.size ** 0.75) * self.genome.metabolism
+        # Scaled to give organisms sustainable endurance
+        bmr = 0.045 * (self.genome.size ** 0.75) * self.genome.metabolism
 
         # Movement energy consumption
         action_factor = 1.0
         if self.current_action in (OrganismAction.HUNT, OrganismAction.FLEE):
-            action_factor = 1.8
+            action_factor = 1.6
         elif self.current_action == OrganismAction.REST:
-            action_factor = 0.35
+            action_factor = 0.25
 
         energy_loss = bmr * action_factor * terrain_cost * stamina_factor
         self.energy -= energy_loss
@@ -438,12 +498,12 @@ class Organism:
         # Water evaporation / dehydration
         temp = world.get_temperature_at(self.x, self.y, weather)
         temp_diff = abs(temp - self.genome.optimal_temperature)
-        water_loss = 0.06 * (self.genome.size ** 0.5) * (1.0 + max(0.0, temp - 25.0) * 0.05)
+        water_loss = 0.035 * (self.genome.size ** 0.5) * (1.0 + max(0.0, temp - 25.0) * 0.03)
         self.water -= water_loss
 
-        # Thermal stress damage if outside tolerance window
+        # Thermal stress damage if significantly outside tolerance window
         if temp_diff > self.genome.temperature_tolerance:
-            stress = (temp_diff - self.genome.temperature_tolerance) * 0.05
+            stress = (temp_diff - self.genome.temperature_tolerance) * 0.03
             self.health -= stress
 
     def _give_birth(self, world: WorldGrid, rng: random.Random) -> List["Organism"]:
