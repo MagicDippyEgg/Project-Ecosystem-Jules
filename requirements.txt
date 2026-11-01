@@ -1,0 +1,4 @@
+pygame>=2.6.0
+numpy>=2.0.0
+pytest>=8.0.0
+pyinstaller>=6.10.0
