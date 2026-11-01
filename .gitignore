@@ -5,3 +5,6 @@ __pycache__/
 .pytest_cache/
 saves/*.eco
 verification_output/
+build/
+dist/
+*.spec
